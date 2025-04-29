@@ -1,5 +1,5 @@
-# JEMM_Carbon_Scalibility_Tool
-This repository's purpose is to establish public access to the JEMM Carbon Scalibility Tool Version 10 python code.
+# JEMM_Carbon_Scalability_Tool
+This repository's purpose is to establish public access to the JEMM Carbon Scalability Tool Version 10 Python code.
 
 # About 
 JEMM Carbon is a student capstone team at Simon Fraser University (SFU), Sustainable Energy Engineering (SEE), in Vancouver, Canada.
