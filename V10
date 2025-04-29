@@ -1,0 +1,683 @@
+import numpy as np
+import math
+from math import sqrt, exp
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# =============================================================================
+# 1. MATERIAL PROPERTIES
+# =============================================================================
+class AdsorbentProperties:
+    """
+    Contains adsorbent properties.
+    Selected Adsorbent: COC-A60 (4x8) granular activated carbon from coconut shell
+    Alternative: COC-A60 (4x12) granular activated carbon from coconut shell
+
+    References:
+        - Particle radius for COC-A60 granular activated carbon from coconut shell:
+          0.001785 m (Alternative: 0.00126 m for 4x12 mesh size alternative option).
+        - Radius of activated carbon crystal:
+          Z. U. Nisa, L. K. Chuan, B. H. Guan, F. Ahmad, and S. Ayub,
+          "A Comparative Study on the Crystalline and Surface Properties of Carbonized Mesoporous Coconut Shell Chars",
+          Sustainability, vol. 15, no. 8, Art. no. 8, Jan. 2023, doi: 10.3390/su15086464.
+        - Mean pore radius:
+          A. S. Ello et al., “Coconut shell-based microporous carbons for CO2 capture,”
+          Microporous and Mesoporous Materials, vol. 180, pp. 280–283, Nov. 2013,
+          doi: 10.1016/j.micromeso.2013.07.008.
+        - Tortuosity factor and particle porosity:
+          Tirzhá Lins Porto Dantas et al., “Adsorption of Carbon Dioxide onto Activated Carbon and Nitrogen-
+          Enriched Activated Carbon: Surface Changes, Equilibrium, and Modeling of Fixed-Bed Adsorption,”
+          ResearchGate, Oct. 2024, Accessed Feb. 19, 2025.
+    """
+    def __init__(self):
+        self.r_p = 0.001785      # Particle radius for COC-A60 (m)
+        self.r_c = 1.265e-9      # Radius of activated carbon crystal (m)
+        self.r_0 = 0.41375e-9    # Mean pore radius (m)
+        self.tortuosity_factor = 2.2  # Tortuosity factor for activated carbon
+        self.greek_e = 0.47      # Particle porosity
+
+class GasStreamProperties:
+    """
+    Contains the gas stream properties for the boiler’s output.
+
+    References:
+        - Molecular weight for CO2 and N2, and Lennard-Jones parameters:
+          R. Byron Bird, Warren E. Stewart, and Edwin N. Lightfoot,
+          Transport Phenomena, Second Edition, John Wiley & Sons, Inc., 2002.
+    """
+    def __init__(self):
+        self.T = 298.15  # Temperature in K
+        self.P = 1       # Pressure in atm
+        self.p = 1.184   # Gas density in kg/m^3
+        # Molecular weights (g/mol)
+        self.M_CO2 = 44.01
+        self.M_N2 = 28.02
+        # Lennard-Jones characteristic diameters in Å
+        self.greek_o_CO2 = 3.996
+        self.greek_o_N2 = 3.667
+        # Lennard-Jones epsilon/k in K
+        self.epsilon_CO2_K = 190
+        self.epsilon_N2_K = 99.8
+
+# =============================================================================
+# 2. MASS TRANSFER CALCULATION
+# =============================================================================
+class KLCalculator:
+    """
+    Calculates the overall mass transfer coefficient, K_L (s⁻¹), for CO2 adsorption.
+
+    Uses a combination of film and pore diffusion resistances based on:
+      - Wilke's rule for viscosity mixtures.
+      - Arrhenius-based diffusivity correlations.
+      - Langmuir isotherm-based driving force.
+
+    References:
+        - Diffusivity constants (CO2 and N2) and activation energies:
+          S. Cavenati, C. A. Grande, and A. E. Rodrigues, “Separation of CH4/CO2/N2 mixtures by
+          layered pressure swing adsorption for upgrade of natural gas,” Chemical Engineering Science,
+          vol. 61, no. 12, pp. 3893–3906, 2006, doi: 10.1016/j.ces.2006.01.023.
+        - Additional source for diffusivity:
+          B. Zhang, P. Liu, Z. Huang, and J. Liu, “Adsorption Equilibrium and Diffusion of CH4, CO2,
+          and N2 in Coal-Based Activated Carbon,” ACS Omega, vol. 8, no. 11, pp. 10303–10313, Mar. 2023,
+          doi: 10.1021/acsomega.2c07910.
+    """
+    def __init__(self, u, q_0, C_0, gas_stream: GasStreamProperties, adsorbent: AdsorbentProperties):
+        self.gas_stream = gas_stream
+        self.adsorbent = adsorbent
+        self.u = u         # Superficial velocity (m/s)
+        self.q_0 = q_0     # Adsorbed equilibrium concentration (mol/m^3)
+        self.C_0 = C_0     # Adsorbate concentration (dimensionless)
+
+    def main_calculation(self):
+        D_m = self.calculate_D_m()
+        greek_u_combined = self.calculate_greek_u_combined()
+        k_f = self.calculate_k_f()
+        D_e = self.calculate_D_e()
+        D_c_rc = self.calculate_D_c_rc()
+
+        r_p = self.adsorbent.r_p
+        q_0 = self.q_0
+        C_0 = self.C_0
+        greek_e = self.adsorbent.greek_e
+
+        # Overall resistance to mass transfer (film, pore and surface diffusion)
+        K_L = 1 / (
+            ((r_p * q_0) / (3 * k_f * C_0)) +
+            ((r_p**2 * q_0) / (15 * greek_e * D_e * C_0)) +
+            (1 / (15 * D_c_rc))
+        )
+        return K_L
+
+    def calculate_D_m(self):
+        """
+        Calculates the molecular diffusivity (D_m) in cm²/s based on kinetic theory.
+        """
+        T = self.gas_stream.T
+        # Calculate collision integral omega using an empirical correlation.
+        epsilon_all_K = sqrt(self.gas_stream.epsilon_CO2_K * self.gas_stream.epsilon_N2_K)
+        T_dimensionless = T / epsilon_all_K
+        omega = (
+            (1.06036 / (T_dimensionless ** 0.15610)) +
+            (0.19300 / exp(0.47635 * T_dimensionless)) +
+            (1.03587 / exp(1.52996 * T_dimensionless)) +
+            (1.76474 / exp(3.89411 * T_dimensionless))
+        )
+        M_CO2 = self.gas_stream.M_CO2
+        M_N2 = self.gas_stream.M_N2
+        # Average characteristic diameter, converted from Å to cm.
+        greek_o_combined = ((self.gas_stream.greek_o_CO2 + self.gas_stream.greek_o_N2) / 2) * 1e-8
+        p = self.gas_stream.p
+        P = self.gas_stream.P
+        D_m = (0.0018583 * sqrt((T ** 3) * ((1 / M_CO2) + (1 / M_N2)))
+               / (p * P * (greek_o_combined ** 2) * omega))
+        return D_m
+
+    def calculate_greek_u_combined(self):
+        """
+        Calculates the combined dynamic viscosity (in g/(cm·s)) for the gas mixture using Wilke's rule.
+        """
+        T = self.gas_stream.T
+        C_0 = self.C_0
+        M_CO2 = self.gas_stream.M_CO2
+        M_N2 = self.gas_stream.M_N2
+        greek_o_CO2 = self.gas_stream.greek_o_CO2
+        greek_o_N2 = self.gas_stream.greek_o_N2
+        epsilon_CO2_K = self.gas_stream.epsilon_CO2_K
+        epsilon_N2_K = self.gas_stream.epsilon_N2_K
+
+        greek_u_CO2 = self.greek_u_Calculation(T, M_CO2, greek_o_CO2, epsilon_CO2_K)
+        greek_u_N2 = self.greek_u_Calculation(T, M_N2, greek_o_N2, epsilon_N2_K)
+
+        mole_fractions = [C_0, 1 - C_0]
+        molecular_weights = [M_CO2, M_N2]
+        viscosities = [greek_u_CO2, greek_u_N2]
+        greek_u_combined = 0
+
+        for alpha in range(2):
+            denominator = 0
+            for beta in range(2):
+                Phi_ab = self.compute_phi(molecular_weights[alpha], molecular_weights[beta],
+                                          viscosities[alpha], viscosities[beta])
+                denominator += mole_fractions[beta] * Phi_ab
+            greek_u_combined += (mole_fractions[alpha] * viscosities[alpha]) / denominator
+        return greek_u_combined
+
+    def compute_phi(self, M_alpha, M_beta, mu_alpha, mu_beta):
+        """
+        Computes the Wilke's correction factor, Φ_ab.
+        """
+        term1 = (1 + M_alpha / M_beta) ** -0.5
+        term2 = (1 + sqrt(mu_alpha / mu_beta) * (M_beta / M_alpha) ** 0.25) ** 2
+        Phi_ab = (1 / sqrt(8)) * term1 * term2
+        return Phi_ab
+
+    def greek_u_Calculation(self, T, M, greek_o, epsilon_K):
+        """
+        Calculates the dynamic viscosity (in g/(cm·s)) for a pure gas component
+        using an empirical correlation.
+        """
+        T_dimensionless = T / epsilon_K
+        omega = (
+            (1.16145 / (T_dimensionless ** 0.14874)) +
+            (0.52487 / exp(0.77320 * T_dimensionless)) +
+            (2.16178 / exp(2.43787 * T_dimensionless))
+        )
+        greek_u = (2.6693e-5) * sqrt(M * T) / ((greek_o ** 2) * omega)
+        return greek_u
+
+    def calculate_k_f(self):
+        """
+        Calculates the film mass transfer coefficient (k_f) based on an empirical correlation.
+
+        Uses the Sherwood correlation:
+            Sh = 1.09 * Re^0.27 * Sc^(1/3)
+
+        and then:
+            k_f = Sh * D_m / (2 * r_p)
+        """
+        r_p = self.adsorbent.r_p
+        greek_u_combined = self.calculate_greek_u_combined()
+        p = self.gas_stream.p
+        u = self.u
+        Re = (p * u * 2 * r_p) / greek_u_combined
+        D_m = self.calculate_D_m()
+        Sc = greek_u_combined / (p * D_m)
+        Sh = 1.09 * (Re ** 0.27) * (Sc ** (1 / 3))
+        k_f = (Sh * D_m) / (2 * r_p)
+        return k_f
+
+    def calculate_D_e(self):
+        """
+        Calculates the effective diffusivity (D_e, in m²/s) that accounts for both molecular
+        diffusivity and Knudsen diffusivity.
+
+        Knudsen diffusivity is computed as:
+            D_K = 9700 * r_0 * sqrt(T/M_CO2)
+
+        D_e is then:
+            1/D_e = tortuosity_factor * (1/D_m + 1/D_K)
+
+        Note: D_m is converted from cm²/s to m²/s.
+        """
+        r_0 = self.adsorbent.r_0
+        T = self.gas_stream.T
+        M_CO2 = self.gas_stream.M_CO2
+        tortuosity_factor = self.adsorbent.tortuosity_factor
+        # Knudsen diffusivity D_K in m²/s
+        D_K = 9700 * r_0 * sqrt(T / M_CO2)
+        D_m = self.calculate_D_m() * 1e-4  # Conversion cm²/s -> m²/s
+        D_e = 1 / (tortuosity_factor * ((1 / D_m) + (1 / D_K)))
+        return D_e
+
+    def calculate_D_c_rc(self):
+        """
+        Calculates the micropore diffusivity (D_c) using a resistance-in-series model.
+
+        Uses the Arrhenius equation for diffusivity:
+            diffusivity = diffusivity_infinite * exp(-activation_energy / (R*T))
+
+        Then computes the overall micropore diffusivity as a weighted (inverse) sum:
+            D_c = 1 / ((C_0/diffusivity_CO2) + ((1-C_0)/diffusivity_N2))
+
+        References:
+            - S. Cavenati, C. A. Grande, and A. E. Rodrigues,
+              "Separation of CH4/CO2/N2 mixtures by layered pressure swing adsorption for upgrade of natural gas",
+              Chemical Engineering Science, vol. 61, no. 12, pp. 3893–3906, 2006, doi: 10.1016/j.ces.2006.01.023.
+            - B. Zhang, P. Liu, Z. Huang, and J. Liu,
+              "Adsorption Equilibrium and Diffusion of CH4, CO2, and N2 in Coal-Based Activated Carbon",
+              ACS Omega, vol. 8, no. 11, pp. 10303–10313, Mar. 2023, doi: 10.1021/acsomega.2c07910.
+        """
+        R_const = 8324.51  # Gas constant in J/kmol·K
+        T = self.gas_stream.T
+        C_0 = self.C_0
+        diffusivity_infinite_CO2 = 22.1    # s⁻¹ (CO2 diffusivity pre-exponential factor)
+        activation_CO2 = 25.551            # kJ/mol (CO2 activation energy)
+        diffusivity_infinite_N2 = 365.35   # s⁻¹ (N2 diffusivity pre-exponential factor)
+        activation_N2 = 34.732             # kJ/mol (N2 activation energy)
+        diffusivity_CO2 = diffusivity_infinite_CO2 * exp(-activation_CO2 / (R_const * T))
+        diffusivity_N2 = diffusivity_infinite_N2 * exp(-activation_N2 / (R_const * T))
+        D_c = 1 / ((C_0 / diffusivity_CO2) + ((1 - C_0) / diffusivity_N2))
+        return D_c
+
+# =============================================================================
+# 3. BED DESIGN
+# =============================================================================
+class Bed:
+    """
+    Base class for a bed design.
+
+    Attributes:
+        length (float): Bed length (m)
+        num_cylinders (int): Number of small cylinders
+        max_flowrate (float): Maximum flow rate (m³/s)
+    """
+    def __init__(self, length, num_cylinders, max_flowrate):
+        self.length = length
+        self.num_cylinders = num_cylinders
+        self.max_flowrate = max_flowrate
+
+    def display_info(self):
+        print(f"Length: {self.length} m")
+        print(f"Number of Small Cylinders: {self.num_cylinders}")
+        print(f"Maximum flowrate: {self.max_flowrate} m^3/s")
+
+class SmallBed(Bed):
+    def __init__(self):
+        super().__init__(length=2.2, num_cylinders=418, max_flowrate=0.168)
+
+class MediumBed(Bed):
+    def __init__(self):
+        super().__init__(length=4.411, num_cylinders=838, max_flowrate=0.3365)
+
+class LargeBed(Bed):
+    def __init__(self):
+        super().__init__(length=6.397, num_cylinders=1216, max_flowrate=0.4885)
+
+# =============================================================================
+# 4. USER RECOMMENDATIONS
+# =============================================================================
+class UserRecommendations:
+    """
+    Stores and manages design recommendations.
+    """
+    def __init__(self):
+        self.parallel_beds = 1
+        self.series_beds = 1
+        self.recommended_bed_type = None
+        self.other_recommendations = {}
+
+    def update_parallel_beds(self, count):
+        self.parallel_beds = count
+
+    def update_series_beds(self, count):
+        self.series_beds = count
+
+    def set_recommended_bed_type(self, bed_type):
+        self.recommended_bed_type = bed_type
+
+    def add_recommendation(self, key, value):
+        self.other_recommendations[key] = value
+
+    def display_recommendations(self):
+        print("User Recommendations:")
+        print(f"  Parallel Beds: {self.parallel_beds}")
+        print(f"  Series Beds: {self.series_beds}")
+        if self.recommended_bed_type:
+            print(f"  Recommended Bed Type: {self.recommended_bed_type}")
+        if self.other_recommendations:
+            print("  Other Recommendations:")
+            for key, value in self.other_recommendations.items():
+                print(f"    {key}: {value}")
+
+# =============================================================================
+# 5. SIMULATION ENGINE
+# =============================================================================
+class CarbonAdsorptionSimulation:
+    """
+    Runs a numerical simulation of CO2 adsorption in a bed of activated carbon (small cylinders)
+    using a finite difference method for the concentration profiles and a Langmuir isotherm.
+
+    The simulation also supports optimizing bed size and calculating breakthrough time.
+
+    Design parameters and simulation settings are based on user input and bed selection.
+
+    References:
+        - CO2 Dual-site Langmuir isotherm parameters b1, b2, q_max1 and q_max2 for
+          coconut-shell-based activated carbon subjected to a CO2 and N2 stream
+          at 20 degrees Celsius and 1.5 bar pressure at inlet:
+          E. S. Efretuei, I. I. Olateju, J. O. Owolabi, and A. Giwa,
+          “MODELLING AND SIMULATION OF AN ADSORPTION PROCESS USING ACTIVATED
+          CARBON FROM COCONUT SHELLS,” vol. 17, no. 9, 2022.
+    """
+    def __init__(self, Q_0, num_SC, L, k_L, recommendations):
+        # Design parameters for one small cylinder
+        self.rad_SC = 0.01905                # Cylinder radius (m)
+        self.rho_b = 1000                    # Bed bulk density (kg/m^3)
+        self.k_L = k_L                       # Mass transfer coefficient (s⁻¹)
+        self.A_SC = math.pi * (self.rad_SC ** 2)  # Cross-sectional area (m²)
+        self.Q = Q_0 / num_SC                # Flow rate per cylinder (m³/s)
+        self.b1 = 2.07                       # Langmuir isotherm parameter at site one for 75C (m^3 / mol)
+        self.b2 = 0.16                       # Langmuir isotherm parameter at site two for 75C (m^3 / mol)
+        self.q_max1 = 1.22e-1                # Maximum adsorption capacity (kg/kg) at site one for 75C
+        self.q_max2 = 1.2e-1                 # Maximum adsorption capacity (kg/kg) at site two for 75C
+        self.outlet_concentration = []       # Outlet concentration history
+        self.total_adsorbed = []             # Adsorbed mass history
+        self.recommendations = recommendations
+
+        # Simulation parameters
+        self.delta_z = 0.05   # Spatial step (m)
+        self.delta_t = 0.05   # Time step (s)
+        self.L = L            # Bed length (m)
+        self.total_L = L      # Total bed length for series configuration (m)
+        self.num_SC = num_SC  # Number of small cylinders
+        self.N = int(self.L / self.delta_z)
+        self.T_max = 60000    # Maximum simulation time (s)
+        self.timesteps = int(self.T_max / self.delta_t)
+
+        # Initialize concentration arrays
+        self.c = np.zeros(self.N)  # Gas-phase concentration (mol/m^3)
+        self.q = np.zeros(self.N)  # Adsorbed-phase concentration (kg/kg)
+
+    def simulate(self, c_in, capture_efficiency):
+        c = np.copy(self.c)
+        q = np.copy(self.q)
+        outlet_concentration = []
+        total_adsorbed = []
+        q_table = np.zeros((self.timesteps, self.N))
+        c_table = np.zeros((self.timesteps, self.N))
+
+        for n in range(self.timesteps):
+            c_new = np.copy(c)
+            q_new = np.copy(q)
+            # Update equilibrium adsorption via isotherm:
+            q_star = (
+                self.q_max1 * (self.b1 * c) / (1 + self.b1 * c)
+                + self.q_max2 * (self.b2 * c) / (1 + self.b2 * c)
+                ) # Dual-Site Langmuir for CO2
+            dq_dt = self.k_L * (q_star - q)
+            dq_dt *= capture_efficiency  # Apply capture efficiency
+            q_new += self.delta_t * dq_dt
+
+            # Mass balance on the spatial grid:
+            for i in range(1, self.N):
+                advection = (self.Q * self.delta_t / self.delta_z) * (c[i] - c[i-1])
+                adsorption = self.delta_t * self.rho_b * self.A_SC * dq_dt[i]
+                c_new[i] -= advection + adsorption
+
+            # Inlet boundary condition
+            c_new[0] = c_in
+            c = c_new
+            q = q_new
+            q_table[n] = q
+            c_table[n] = c
+            outlet_concentration.append(c[-1])
+            total_adsorbed_at_timestep = np.sum(q) * self.rho_b * self.A_SC * self.delta_z * self.num_SC
+            total_adsorbed.append(total_adsorbed_at_timestep)
+
+        self.outlet_concentration = outlet_concentration
+        self.total_adsorbed = total_adsorbed
+
+        return outlet_concentration, total_adsorbed, q_table, c_table
+
+    def calculate_breakthrough_time(self, outlet_concentration, c_in_total):
+        print(f"Calculating breakthrough time for {self.recommendations.series_beds} bed(s) in series...")
+        outlet_concentration = np.array(outlet_concentration)
+        condition_met = outlet_concentration / c_in_total >= 0.05
+        if np.any(condition_met):
+            breakthrough_index = np.argmax(condition_met)
+            BT_time = breakthrough_index * self.delta_t
+        else:
+            BT_time = None
+
+        if BT_time is not None:
+            print(f"Breakthrough time: {BT_time/3600:.2f} hours")
+        else:
+            print("No breakthrough detected.")
+
+        return BT_time
+
+    def optimize_size(self, c_in, c_in_total, capture_efficiency):
+        self.total_L += self.L
+        self.N = int(self.total_L / self.delta_z)
+        self.c = np.zeros(self.N)
+        self.q = np.zeros(self.N)
+        outlet_concentration, total_adsorbed, q_table, c_table = self.simulate(c_in, capture_efficiency)
+        BT_time = self.calculate_breakthrough_time(outlet_concentration, c_in_total)
+        return BT_time, outlet_concentration, total_adsorbed, q_table, c_table
+
+    def plot_results(self, c_in_total, q_table, c_table):
+        plt.figure(figsize=(8, 5))
+        plt.plot(np.arange(self.timesteps)*self.delta_t/60,
+                 np.array(self.outlet_concentration) / c_in_total, label='Breakthrough Curve')
+        plt.xlabel('Time (hours)')
+        plt.ylabel('Outlet CO2 Concentration / Inlet CO2 Concentration')
+        plt.title('CO2 Breakthrough Curve')
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(8, 5))
+        plt.plot(np.arange(self.timesteps)*self.delta_t/60, self.total_adsorbed, label='Total Adsorbed Mass')
+        plt.xlabel('Time (minutes)')
+        plt.ylabel('Total Adsorbed Mass (kg)')
+        plt.title('Total Adsorbed Mass')
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        print(f"Final total adsorbed mass: {self.total_adsorbed[-1]:.4f} kg")
+
+    def display_data_tables(self, q_table, c_table):
+        # If desired for detailed analysis
+        q_df = pd.DataFrame(q_table, columns=[f"z{i}" for i in range(q_table.shape[1])])
+        c_df = pd.DataFrame(c_table, columns=[f"z{i}" for i in range(c_table.shape[1])])
+
+        # Tables key: columns are for each spatial point, rows are for each time step
+        #The q table prints the amount of CO2 adsorbed into the material along the length of the bed for each time step
+        print("\nq_table:")
+        print(q_df)
+
+        #The c table prints the concentration of CO2 in the stream--not yet adsorbed--along the length of the bed for each time step
+        print("\nc_table:")
+        print(c_df)
+
+    def display_parameters(self):
+        print(f"Radial SC: {self.rad_SC} m")
+        print(f"Bed Bulk Density: {self.rho_b} kg/m^3")
+        print(f"Mass Transfer Coefficient (k_L): {self.k_L} s^-1")
+        print(f"Cross-sectional Area (A_SC): {self.A_SC} m^2")
+        print(f"Volumetric Flow Rate (Q): {self.Q} m^3/s")
+        print(f"Spatial Step (delta_z): {self.delta_z} m")
+        print(f"Time Step (delta_t): {self.delta_t} s")
+        print(f"Spatial Points (N): {self.N}")
+        print(f"Maximum Simulation Time (T_max): {self.T_max} s")
+        print(f"Timesteps: {self.timesteps}")
+
+# =============================================================================
+# 6. USER INPUT & MAIN ROUTINE
+# =============================================================================
+def user_input():
+    print("""
+============================================================
+          Welcome to the Scalability Tool
+============================================================
+
+This script collects basic input parameters to simulate CO₂ capture
+from a boiler's exhaust stream. You'll be asked to provide:
+
+    • Boiler's exit flow-rate (in m³/s)
+    • CO₂ concentration in the boiler outlet (fraction or %)
+
+Key Information:
+------------------------------------------------------------
+- The flow-rate determines the size of the carbon capture system.
+- The CO₂ concentration affects the adsorption capacity and design.
+- The total gas concentration is preset (pretreatment module).
+- CO₂ adsorption is modeled using a **Dual-Site Langmuir Isotherm**
+  for higher accuracy, representing two types of adsorption sites.
+- A capture efficiency of **90%** is assumed throughout.
+
+Inputs returned:
+    - Q_0: Flow-rate (m³/s)
+    - c_in_total: Total inlet gas concentration (mol/m³)
+    - CO2_conc: Fraction of CO₂ in the inlet stream
+    - c_in: CO₂ concentration (mol/m³)
+    - capture_efficiency: Fixed capture efficiency
+============================================================
+""")
+
+    # Prompt for boiler exit flow-rate
+    while True:
+        flow_prompt = (
+            "\nEnter the boiler's exit flow-rate (m³/s):\n"
+            "    Small        (≤ 0.1680 m³/s)\n"
+            "    Medium       (0.1681–0.3365 m³/s)\n"
+            "    Large        (0.3366–0.4885 m³/s)\n"
+            "    Extra-Large  (≥ 0.4886 m³/s)\n"
+            "[Default: 0.168 m³/s] > "
+        )
+        raw_Q0 = input(flow_prompt).strip()
+        if raw_Q0 == "":
+            Q_0 = 0.168
+            break
+        try:
+            Q_0 = float(raw_Q0)
+            if Q_0 <= 0:
+                print("\n[Error] Flow-rate must be greater than zero. Please try again.")
+            else:
+                break
+        except ValueError:
+            print("\n[Warning] Invalid input detected. Please enter a valid number.")
+
+    # Prompt for CO₂ fraction
+    while True:
+        co2_prompt = (
+            "\nEnter the CO₂ concentration in the boiler's outlet stream:\n"
+            "    (Acceptable formats: 0.11 for 11% or 11%)\n"
+            "    Typical range: 9% – 15%\n"
+            "[Default: 11%] > "
+        )
+        raw_CO2 = input(co2_prompt).strip()
+        if raw_CO2 == "":
+            CO2_conc = 0.11
+            break
+        try:
+            if raw_CO2.endswith('%'):
+                CO2_conc = float(raw_CO2.rstrip('%')) / 100.0
+            else:
+                val = float(raw_CO2)
+                CO2_conc = val if 0 < val <= 1 else val / 100.0
+
+            if 0.09 <= CO2_conc <= 0.15:
+                break
+            else:
+                print("\n[Error] CO₂ concentration must be between 9% and 15%. Please try again.")
+        except ValueError:
+            print("\n[Warning] Invalid input detected. Please enter a valid CO₂ concentration.")
+
+    # Total inlet concentration (mol/m³) set by pretreatment module
+    c_in_total = 41.6
+    c_in = CO2_conc * c_in_total
+
+    # Capture efficiency (fixed)
+    capture_efficiency = 0.9
+
+    print("\n============================================================")
+    print("Inputs successfully collected. Proceeding with simulation...")
+    print("============================================================\n")
+
+    return {
+        'Q_0': Q_0,
+        'c_in_total': c_in_total,
+        'CO2_conc': CO2_conc,
+        'c_in': c_in,
+        'capture_efficiency': capture_efficiency
+    }
+
+def main():
+    # Get user input and initialize recommendations
+    inputs = user_input()
+    recommendations = UserRecommendations()
+    # Material properties
+    gas_stream = GasStreamProperties()
+    adsorbent = AdsorbentProperties()
+
+    # Bed options (Small, Medium, Large)
+    small_bed = SmallBed()
+    medium_bed = MediumBed()
+    large_bed = LargeBed()
+
+    # Determine the appropriate bed based on flow rate and adjust the number of parallel beds
+    parallel_beds = 1
+    selected_bed = None
+    Q_0 = inputs['Q_0']
+
+    while True:
+        effective_flow_rate = Q_0 / parallel_beds
+        print(f"Trying {parallel_beds} parallel bed(s) with effective flow rate: {effective_flow_rate} m^3/s")
+        if effective_flow_rate <= small_bed.max_flowrate:
+            selected_bed = small_bed
+            recommendations.set_recommended_bed_type("SmallBed")
+            break
+        elif effective_flow_rate <= medium_bed.max_flowrate:
+            selected_bed = medium_bed
+            recommendations.set_recommended_bed_type("MediumBed")
+            break
+        elif effective_flow_rate <= large_bed.max_flowrate:
+            selected_bed = large_bed
+            recommendations.set_recommended_bed_type("LargeBed")
+            break
+        else:
+            parallel_beds += 1
+            recommendations.update_parallel_beds(parallel_beds)
+            recommendations.add_recommendation("Note", "Increasing parallel beds due to high flow rate.")
+            if parallel_beds > 10:
+                print("Warning: Maximum parallel bed count reached.")
+                break
+
+    if selected_bed is None:
+        print("Error: No suitable bed configuration found. Consult a technician.")
+        return
+
+    # Calculate superficial velocity before creating the KLCalculator.
+    # The per-cylinder flow rate is effective_flow_rate divided by the number of cylinders.
+    A_SC = math.pi * (0.01905)**2  # Cross-sectional area of one small cylinder (m²)
+    u = (effective_flow_rate / selected_bed.num_cylinders) / A_SC
+
+    # Calculate mass transfer coefficient using KLCalculator
+    kl_calc = KLCalculator(u, Q_0, inputs['CO2_conc'], gas_stream, adsorbent)
+    K_L_value = kl_calc.main_calculation()
+    print(f"Calculated K_L: {K_L_value}")
+
+    # Set up the simulation using selected bed parameters
+    num_SC = selected_bed.num_cylinders
+    L = selected_bed.length
+    sim = CarbonAdsorptionSimulation(effective_flow_rate, num_SC, L, K_L_value, recommendations)
+
+    # Run the simulation
+    outlet_conc, total_ads, q_table, c_table = sim.simulate(inputs['c_in'], inputs['capture_efficiency'])
+    BT_time = sim.calculate_breakthrough_time(outlet_conc, inputs['c_in_total'])
+
+    # Optimize bed size (if needed) until breakthrough time meets design goals
+    time_between_cycles = 2 * 3600  # 2 hours in seconds
+    max_iterations = 2
+    iteration = 0
+    series_beds = 1
+    while BT_time is not None and BT_time < time_between_cycles and iteration < max_iterations:
+        series_beds += 1
+        recommendations.update_series_beds(series_beds)
+        BT_time, outlet_conc, total_ads, q_table, c_table = sim.optimize_size(
+            inputs['c_in'], inputs['c_in_total'], inputs['capture_efficiency']
+        )
+        iteration += 1
+        if series_beds >= 3:
+            print("Warning: Three or more series beds reached. Consult a JEMM Carbon technician.")
+
+    if iteration == max_iterations:
+        print("Warning: Optimization did not converge within max iterations.")
+
+    recommendations.display_recommendations()
+    sim.plot_results(inputs['c_in_total'], q_table, c_table)
+
+if __name__ == "__main__":
+    main()
